@@ -1,0 +1,59 @@
+# Publishes create-evda to npm with npm's trusted publishing (HQ-3065): a short-lived OIDC token
+# GitHub mints for this job, so no npm token or login exists anywhere.
+#
+# Why here and not in the evda repo: npm accepts trusted publishing only from GitHub-hosted
+# runners, evda's workflows run on self-hosted machines, and this repo is public, so its hosted
+# minutes are free. evda's `scripts/publish.mjs --publish --via-ci` packs the tarball from the
+# release commit, uploads it to a `create-evda@<version>` release here (prerelease, never latest,
+# so the app's updater, which reads releases/latest, never sees it), and starts this workflow. It
+# then waits for npm to list the version before tagging the commit in evda.
+#
+# npmjs.com must name this file as create-evda's trusted publisher (package Settings, Trusted
+# publishing, GitHub Actions: mikedouzinas / evda-releases / publish-create-evda.yml). Until it
+# does, `npm publish` here fails with a 404 or 401 and nothing is published.
+name: publish-create-evda
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "the create-evda version whose tarball is on the create-evda@<version> release"
+        required: true
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: publish-create-evda
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      VERSION: ${{ inputs.version }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: refuse anything but a plain version
+        run: |
+          [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "::error::'$VERSION' is not a plain x.y.z version"; exit 1; }
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          registry-url: https://registry.npmjs.org
+      # Trusted publishing needs npm 11.5.1 or later.
+      - run: npm install -g npm@11
+      - name: refuse a version npm already has
+        run: |
+          if npm view "create-evda@$VERSION" version 2>/dev/null | grep -qx "$VERSION"; then
+            echo "::error::create-evda $VERSION is already on npm"; exit 1
+          fi
+      - name: download the tarball evda packed
+        run: gh release download "create-evda@$VERSION" --repo "$GITHUB_REPOSITORY" --pattern "create-evda-$VERSION.tgz"
+      - name: the tarball is the package and version asked for
+        run: |
+          got=$(tar -xOzf "create-evda-$VERSION.tgz" package/package.json | node -p 'const p=JSON.parse(require("fs").readFileSync(0,"utf8")); p.name+"@"+p.version')
+          [ "$got" = "create-evda@$VERSION" ] || { echo "::error::tarball is $got, expected create-evda@$VERSION"; exit 1; }
+      - run: npm publish "create-evda-$VERSION.tgz" --access public
